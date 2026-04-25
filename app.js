@@ -55,6 +55,8 @@
   }
 
   function showError(msg) {
+    // Cancel any queued render so it doesn't immediately clear what we're about to show.
+    clearTimeout(debounceTimer);
     errBox.textContent = msg;
     errBox.hidden = false;
   }
@@ -85,30 +87,49 @@
   // Each one re-derives (targetW, targetH) from the input being edited.
   // Aspect ratio is always locked to the source image.
 
+  // Each setter returns true on a valid edit (canonical updated) or false on
+  // an invalid one (empty/zero) so callers know to skip syncing the other
+  // fields. This prevents mid-typing inputs from collapsing every other
+  // dimension to 1.
+
   function setFromPercent() {
     const p = (+percent.value || 0) / 100;
+    if (!p) return false;
     targetW = Math.max(1, Math.round(originalW * p));
     targetH = Math.max(1, Math.round(originalH * p));
+    return true;
   }
 
   function setFromExactW() {
-    targetW = Math.max(1, +exactW.value || 1);
+    const v = +exactW.value;
+    if (!v || v < 1) return false;
+    targetW = Math.max(1, Math.round(v));
     targetH = Math.max(1, Math.round(targetW / ratio()));
+    return true;
   }
   function setFromExactH() {
-    targetH = Math.max(1, +exactH.value || 1);
+    const v = +exactH.value;
+    if (!v || v < 1) return false;
+    targetH = Math.max(1, Math.round(v));
     targetW = Math.max(1, Math.round(targetH * ratio()));
+    return true;
   }
 
   function setFromPhysW() {
+    const v = +physW.value;
+    if (!v || v <= 0) return false;
     const k = pxPerUnit();
-    targetW = Math.max(1, Math.round((+physW.value || 0) * k));
+    targetW = Math.max(1, Math.round(v * k));
     targetH = Math.max(1, Math.round(targetW / ratio()));
+    return true;
   }
   function setFromPhysH() {
+    const v = +physH.value;
+    if (!v || v <= 0) return false;
     const k = pxPerUnit();
-    targetH = Math.max(1, Math.round((+physH.value || 0) * k));
+    targetH = Math.max(1, Math.round(v * k));
     targetW = Math.max(1, Math.round(targetH * ratio()));
+    return true;
   }
 
   function setFromKeepOriginal() {
@@ -371,7 +392,7 @@
   function bindEdit(editor, setter) {
     editor.addEventListener('input', () => {
       if (syncing || !original) return;
-      setter();
+      if (setter() === false) return;
       syncDisplays(editor);
       debouncedRender();
     });
@@ -388,7 +409,8 @@
   // and propagate to all other displays.
   physDpi.addEventListener('input', () => {
     if (syncing || !original) return;
-    setFromPhysW();
+    if (!(+physDpi.value > 0)) return;
+    if (setFromPhysW() === false) return;
     syncDisplays(physDpi);
     debouncedRender();
   });
@@ -457,6 +479,28 @@
     preview.innerHTML = '';
     meta.innerHTML = '';
     clearError();
+
+    // Restore every form control back to its initial default so the next
+    // image doesn't inherit the previous session's settings.
+    dimMode.value = 'none';
+    percent.value = 50;
+    percentVal.textContent = '50%';
+    exactW.value = '';
+    exactH.value = '';
+    physW.value = '';
+    physH.value = '';
+    physUnit.value = 'in';
+    physDpi.value = '300';
+    physPxReadout.textContent = '';
+    strategy.value = 'quality';
+    quality.value = 80;
+    qualityVal.textContent = '80%';
+    quality.disabled = false;
+    targetKb.value = '500';
+    format.value = 'image/webp';
+    syncDimRows();
+    $('row-quality').hidden = strategy.value !== 'quality';
+    $('row-target').hidden = strategy.value !== 'target';
   });
 
   // Initial UI state

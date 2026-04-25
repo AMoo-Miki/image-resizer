@@ -2,3 +2,4 @@
 .playwright-mcp/
 live-test-*.png
 *.log
+test-results.json

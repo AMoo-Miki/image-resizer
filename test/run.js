@@ -1,0 +1,695 @@
+// Browser-side test runner. Loaded via Playwright `evaluate`.
+// Returns { total, passed, failedCount, failed: [...], details: [...] }.
+//
+// Helpers run inside the page; they assume the live app's IIFE has booted.
+// All reads use document.getElementById(...).
+window.__runTests = async function () {
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const results = [];
+  const pass = (name) => results.push({ name, ok: true });
+  const fail = (name, info) => results.push({ name, ok: false, ...info });
+
+  function eq(name, got, want) {
+    if (Object.is(got, want) || JSON.stringify(got) === JSON.stringify(want)) pass(name);
+    else fail(name, { msg: 'mismatch', got, want });
+  }
+  function close(name, got, want, eps) {
+    if (typeof got === 'number' && typeof want === 'number' && Math.abs(got - want) <= eps) pass(name);
+    else fail(name, { msg: `not within ${eps}`, got, want });
+  }
+  function truthy(name, got) { got ? pass(name) : fail(name, { msg: 'expected truthy', got }); }
+  function falsy(name, got)  { !got ? pass(name) : fail(name, { msg: 'expected falsy', got }); }
+
+  // Read a snapshot of every dimension control's display state.
+  function readState() {
+    return {
+      mode: $('dim-mode').value,
+      percentSlider: +$('percent').value,
+      percentReadout: $('percent-val').textContent,
+      exactW: +$('exact-w').value,
+      exactH: +$('exact-h').value,
+      physW: +$('phys-w').value,
+      physH: +$('phys-h').value,
+      physUnit: $('phys-unit').value,
+      physDpi: +$('phys-dpi').value,
+      physReadout: $('phys-px-readout').textContent,
+      meta: $('meta').textContent.trim(),
+      previewSrc: ($('preview').querySelector('img') || {}).src || '',
+      downloadDisabled: $('download').disabled,
+      controlsHidden: $('controls').hidden,
+      dropHidden: $('drop').hidden,
+      errorHidden: $('error').hidden,
+      errorText: $('error').textContent,
+    };
+  }
+
+  // Convert a state into the canonical pixel target inferred from each view.
+  // All four should produce the same (w, h).
+  function inferredFromControls(s) {
+    const k = s.physUnit === 'cm' ? s.physDpi / 2.54 : s.physDpi;
+    return {
+      fromExact: { w: s.exactW, h: s.exactH },
+      fromPhys:  { w: Math.round(s.physW * k), h: Math.round(s.physH * k) },
+      fromPercentReadout: (() => {
+        const pct = parseFloat(s.percentReadout) / 100;
+        return null; // we don't know originalW from state alone
+      })(),
+    };
+  }
+
+  // Set an input value and dispatch the right event the app listens to.
+  function setRange(el, v) { el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); }
+  function setNum(el, v)   { el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); }
+  function setSelect(el, v){ el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); }
+
+  // Build a synthetic PNG of given dims and a given color pattern, return Blob.
+  async function makePng(w, h, drawer) {
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    drawer ? drawer(g, w, h) : (g.fillStyle = '#888', g.fillRect(0, 0, w, h));
+    return new Promise((r) => c.toBlob(r, 'image/png'));
+  }
+
+  async function loadBlob(blob, name = 'test.png', type = blob.type) {
+    const dt = new DataTransfer();
+    dt.items.add(new File([blob], name, { type }));
+    const input = $('file');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Wait for the app to settle: poll until preview src changes (or timeout).
+  async function waitForRender(prevSrc = '', timeout = 1500) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const cur = ($('preview').querySelector('img') || {}).src || '';
+      if (cur && cur !== prevSrc) return cur;
+      await sleep(40);
+    }
+    return ($('preview').querySelector('img') || {}).src || '';
+  }
+
+  async function reset() {
+    if (!$('reset')) return;
+    if (!$('controls').hidden) $('reset').click();
+    await sleep(50);
+  }
+
+  async function loadDefault(w = 1696, h = 1131) {
+    await reset();
+    const blob = await makePng(w, h, (g, W, H) => {
+      const grad = g.createLinearGradient(0, 0, W, H);
+      grad.addColorStop(0, '#7c3aed'); grad.addColorStop(1, '#34d399');
+      g.fillStyle = grad; g.fillRect(0, 0, W, H);
+    });
+    const prev = ($('preview').querySelector('img') || {}).src || '';
+    await loadBlob(blob, `test_${w}x${h}.png`);
+    await waitForRender(prev);
+  }
+
+  // ---------------------- A. Bootstrap / no image ------------------------
+  await reset();
+  {
+    const s = readState();
+    truthy('A1 drop visible', !s.dropHidden);
+    truthy('A1 controls hidden', s.controlsHidden);
+    truthy('A1 error hidden', s.errorHidden);
+    truthy('A1 download disabled', s.downloadDisabled);
+    eq('A1 preview empty', s.previewSrc, '');
+    const drop = $('drop');
+    eq('A2 drop tabindex', drop.getAttribute('tabindex'), '0');
+    eq('A2 drop role', drop.getAttribute('role'), 'button');
+  }
+
+  // ---------------------- B. Image load & re-load ------------------------
+  await loadDefault(1696, 1131);
+  {
+    const s = readState();
+    truthy('B1 controls visible', !s.controlsHidden);
+    truthy('B1 drop hidden', s.dropHidden);
+    eq('B1 mode default', s.mode, 'none');
+    eq('B1 percent slider', s.percentSlider, 100);
+    eq('B1 percent readout', s.percentReadout, '100%');
+    eq('B1 exactW', s.exactW, 1696);
+    eq('B1 exactH', s.exactH, 1131);
+    close('B1 physW (in @ 300)', s.physW, 1696 / 300, 0.005);
+    close('B1 physH (in @ 300)', s.physH, 1131 / 300, 0.005);
+    eq('B1 physReadout', s.physReadout, '→ 1696 × 1131 px');
+    truthy('B1 preview present', !!s.previewSrc);
+    falsy('B1 download enabled', s.downloadDisabled);
+  }
+
+  // B2 non-image
+  await reset();
+  {
+    const txt = new Blob(['not an image'], { type: 'text/plain' });
+    await loadBlob(txt, 'note.txt', 'text/plain');
+    await sleep(150);
+    const s = readState();
+    falsy('B2 controls stay hidden', !s.controlsHidden);
+    falsy('B2 error visible', s.errorHidden);
+    truthy('B2 error mentions image', /image/i.test(s.errorText));
+  }
+
+  // B3 corrupted PNG
+  await reset();
+  {
+    const garbage = new Blob([new Uint8Array([1,2,3,4,5,6,7,8])], { type: 'image/png' });
+    await loadBlob(garbage, 'broken.png', 'image/png');
+    await sleep(300);
+    const s = readState();
+    falsy('B3 error visible', s.errorHidden);
+    truthy('B3 error mentions decode', /decode/i.test(s.errorText));
+  }
+
+  // B4 reload different file resets state
+  await loadDefault(1696, 1131);
+  await loadDefault(800, 600);
+  {
+    const s = readState();
+    eq('B4 reload exactW', s.exactW, 800);
+    eq('B4 reload exactH', s.exactH, 600);
+    eq('B4 reload percent', s.percentSlider, 100);
+  }
+
+  // B5 portrait
+  await loadDefault(800, 1200);
+  {
+    const s = readState();
+    eq('B5 portrait exactW', s.exactW, 800);
+    eq('B5 portrait exactH', s.exactH, 1200);
+  }
+
+  // B6 square
+  await loadDefault(500, 500);
+  {
+    const s = readState();
+    eq('B6 square exactW', s.exactW, 500);
+    eq('B6 square exactH', s.exactH, 500);
+  }
+
+  // ---------------------- C. Row visibility per mode ---------------------
+  await loadDefault(1696, 1131);
+  function visible(id) {
+    const el = $(id);
+    return !el.hidden && getComputedStyle(el).display !== 'none';
+  }
+  function rowVis() {
+    return {
+      percent: visible('row-percent'),
+      exact: visible('row-exact'),
+      physical: visible('row-physical'),
+      physicalDpi: visible('row-physical-dpi'),
+    };
+  }
+  setSelect($('dim-mode'), 'none');     await sleep(100); eq('C1 none', rowVis(), {percent:false,exact:false,physical:false,physicalDpi:false});
+  setSelect($('dim-mode'), 'percent');  await sleep(100); eq('C2 percent', rowVis(), {percent:true,exact:false,physical:false,physicalDpi:false});
+  setSelect($('dim-mode'), 'exact');    await sleep(100); eq('C3 exact', rowVis(), {percent:false,exact:true,physical:false,physicalDpi:false});
+  setSelect($('dim-mode'), 'physical'); await sleep(100); eq('C4 physical', rowVis(), {percent:false,exact:false,physical:true,physicalDpi:true});
+
+  // ---------------------- D. Canonical sync ------------------------------
+  // D1 percent → 50
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'percent');
+  setRange($('percent'), 50);
+  await sleep(400);
+  {
+    const s = readState();
+    eq('D1 percent slider', s.percentSlider, 50);
+    eq('D1 percent readout', s.percentReadout, '50%');
+    eq('D1 exactW', s.exactW, 848);
+    eq('D1 exactH', s.exactH, 566);
+    close('D1 physW', s.physW, 848 / 300, 0.01);
+    close('D1 physH', s.physH, 566 / 300, 0.01);
+    eq('D1 physReadout', s.physReadout, '→ 848 × 566 px');
+  }
+
+  // D2 type exact-w = 848 (after reset to 100%)
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 848);
+  await sleep(400);
+  {
+    const s = readState();
+    eq('D2 exactW', s.exactW, 848);
+    eq('D2 exactH', s.exactH, 566);
+    eq('D2 percent slider', s.percentSlider, 50);
+    eq('D2 percent readout', s.percentReadout, '50%');
+    close('D2 physW', s.physW, 848 / 300, 0.01);
+  }
+
+  // D3 type exact-h = 566
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-h'), 566);
+  await sleep(400);
+  {
+    const s = readState();
+    eq('D3 exactH', s.exactH, 566);
+    eq('D3 exactW', s.exactW, 849); // 566 * 1696/1131 = 849.0...
+    eq('D3 percent', s.percentSlider, 50);
+  }
+
+  // D4 type phys-w = 4 in
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-w'), 4);
+  await sleep(400);
+  {
+    const s = readState();
+    eq('D4 physW', s.physW, 4);
+    close('D4 physH', s.physH, 4 / 1.5, 0.01); // 2.67
+    eq('D4 exactW', s.exactW, 1200);
+    eq('D4 exactH', s.exactH, 800);
+    eq('D4 physReadout', s.physReadout, '→ 1200 × 800 px');
+    eq('D4 percent', s.percentSlider, Math.round(1200 / 1696 * 100));
+  }
+
+  // D5 type phys-h = 4 in
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-h'), 4);
+  await sleep(400);
+  {
+    const s = readState();
+    eq('D5 physH', s.physH, 4);
+    close('D5 physW', s.physW, 4 * 1.5, 0.01);
+    eq('D5 exactH', s.exactH, 1200);
+    // 4in × 300 = 1200; round(1200 * 1696/1131) = round(1799.49) = 1799.
+    eq('D5 exactW', s.exactW, 1799);
+  }
+
+  // D6 DPI 300 → 600 (phys numbers unchanged, pixels double)
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-w'), 4);
+  await sleep(400);
+  setNum($('phys-dpi'), 600);
+  await sleep(400);
+  {
+    const s = readState();
+    eq('D6 phys-w unchanged', s.physW, 4);
+    close('D6 phys-h unchanged', s.physH, 4 / 1.5, 0.01);
+    eq('D6 exactW doubled', s.exactW, 2400);
+    eq('D6 exactH doubled', s.exactH, 1600);
+    eq('D6 readout', s.physReadout, '→ 2400 × 1600 px');
+  }
+
+  // D7 unit in → cm (pixels unchanged)
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-w'), 4);
+  await sleep(400);
+  setSelect($('phys-unit'), 'cm');
+  await sleep(400);
+  {
+    const s = readState();
+    close('D7 physW (cm)', s.physW, 4 * 2.54, 0.02);
+    close('D7 physH (cm)', s.physH, (4 / 1.5) * 2.54, 0.02);
+    eq('D7 pixels unchanged exactW', s.exactW, 1200);
+    eq('D7 pixels unchanged exactH', s.exactH, 800);
+  }
+
+  // D8 unit cm → in round-trip
+  setSelect($('phys-unit'), 'in');
+  await sleep(400);
+  {
+    const s = readState();
+    close('D8 round-trip physW', s.physW, 4, 0.05);
+    eq('D8 round-trip exactW', s.exactW, 1200);
+  }
+
+  // D9 toggle in→cm 5 times, measure drift
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-w'), 4);
+  await sleep(400);
+  for (let i = 0; i < 5; i++) {
+    setSelect($('phys-unit'), 'cm'); await sleep(80);
+    setSelect($('phys-unit'), 'in'); await sleep(80);
+  }
+  await sleep(200);
+  {
+    const s = readState();
+    close('D9 drift after 5 cycles', s.physW, 4, 0.05);
+  }
+
+  // D10 percent above 200% pinned, readout shows real
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 5000);
+  await sleep(400);
+  {
+    const s = readState();
+    eq('D10 slider pinned at 200', s.percentSlider, 200);
+    truthy('D10 readout shows real %', /^29[0-9]%$/.test(s.percentReadout));
+  }
+
+  // D11 exact-w = 0 / empty graceful (no NaN, doesn't reset all to 1)
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 0);
+  await sleep(300);
+  {
+    const s = readState();
+    truthy('D11 zero: exactH not absurd', s.exactH > 0);
+    falsy ('D11 zero: exactH did not collapse to 1', s.exactH === 1);
+  }
+  setNum($('exact-w'), '');
+  await sleep(300);
+  {
+    const s = readState();
+    truthy('D11 empty: exactH not 1', s.exactH > 1);
+  }
+
+  // ---------------------- E. Mode switching preserves canonical ---------
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'percent');
+  setRange($('percent'), 50);
+  await sleep(400);
+  setSelect($('dim-mode'), 'exact');
+  await sleep(150);
+  {
+    const s = readState();
+    eq('E1 exact reflects canonical', { w: s.exactW, h: s.exactH }, { w: 848, h: 566 });
+  }
+
+  // E2 set exact 1000×667, switch to percent
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 1000);
+  await sleep(400);
+  setSelect($('dim-mode'), 'percent');
+  await sleep(150);
+  {
+    const s = readState();
+    eq('E2 percent slider 59', s.percentSlider, 59);
+    eq('E2 percent readout 59%', s.percentReadout, '59%');
+  }
+
+  // E3 set physical 4×2.67 in @ 300, switch to exact
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-w'), 4);
+  await sleep(400);
+  setSelect($('dim-mode'), 'exact');
+  await sleep(150);
+  {
+    const s = readState();
+    eq('E3 exact reflects physical', { w: s.exactW, h: s.exactH }, { w: 1200, h: 800 });
+  }
+
+  // E4 switch to none → resets to original
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 500);
+  await sleep(400);
+  setSelect($('dim-mode'), 'none');
+  await sleep(150);
+  {
+    const s = readState();
+    eq('E4 none resets exactW', s.exactW, 1696);
+    eq('E4 none resets exactH', s.exactH, 1131);
+    eq('E4 none resets percent', s.percentSlider, 100);
+  }
+
+  // ---------------------- F. Aspect ratio always locked ------------------
+  await loadDefault(1696, 1131);
+  const r0 = 1696 / 1131;
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 700);
+  await sleep(300);
+  {
+    const s = readState();
+    close('F2 exact w→h ratio', s.exactW / s.exactH, r0, 0.01);
+  }
+  setNum($('exact-h'), 400);
+  await sleep(300);
+  {
+    const s = readState();
+    close('F3 exact h→w ratio', s.exactW / s.exactH, r0, 0.01);
+  }
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-w'), 5);
+  await sleep(300);
+  {
+    const s = readState();
+    close('F4 phys w→h ratio', s.physW / s.physH, r0, 0.02);
+  }
+  setNum($('phys-h'), 3);
+  await sleep(300);
+  {
+    const s = readState();
+    close('F5 phys h→w ratio', s.physW / s.physH, r0, 0.02);
+  }
+
+  // F6 reload with different aspect → ratio updates
+  await loadDefault(800, 1200); // portrait, ratio 0.667
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 400);
+  await sleep(300);
+  {
+    const s = readState();
+    close('F6 portrait ratio', s.exactW / s.exactH, 800 / 1200, 0.01);
+  }
+
+  // ---------------------- G. Compression ---------------------------------
+  await loadDefault(1696, 1131);
+  // G1 quality slider affects file size
+  setSelect($('format'), 'image/webp');
+  setRange($('quality'), 30); await sleep(400);
+  const sLow = readState();
+  setRange($('quality'), 95); await sleep(400);
+  const sHigh = readState();
+  // We can't read blob size directly; meta has it. Parse "→ <num> KB".
+  function metaSize(meta) {
+    const m = meta.match(/→\s*([\d.]+)\s*(B|KB|MB)/);
+    if (!m) return null;
+    const v = parseFloat(m[1]);
+    const u = m[2];
+    return u === 'B' ? v : u === 'KB' ? v * 1024 : v * 1024 * 1024;
+  }
+  const lowBytes = metaSize(sLow.meta);
+  const highBytes = metaSize(sHigh.meta);
+  truthy('G1 quality 30 < quality 95', lowBytes && highBytes && lowBytes < highBytes);
+
+  // G2 PNG disables quality slider
+  setSelect($('format'), 'image/png'); await sleep(200);
+  truthy('G2 PNG disables quality', $('quality').disabled);
+  setSelect($('format'), 'image/webp'); await sleep(200);
+  falsy('G2 WebP re-enables quality', $('quality').disabled);
+
+  // G3 transparent PNG → JPEG fills white
+  await reset();
+  const transBlob = await new Promise((r) => {
+    const c = document.createElement('canvas'); c.width = 100; c.height = 100;
+    const g = c.getContext('2d');
+    // leave transparent
+    c.toBlob(r, 'image/png');
+  });
+  await loadBlob(transBlob, 'trans.png');
+  await sleep(400);
+  setSelect($('format'), 'image/jpeg');
+  await sleep(500);
+  // Read the preview image's center pixel
+  const centerColor = await new Promise((r) => {
+    const img = $('preview').querySelector('img');
+    if (!img) return r(null);
+    const probe = new Image();
+    probe.crossOrigin = 'anonymous';
+    probe.onload = () => {
+      const c = document.createElement('canvas'); c.width = probe.naturalWidth; c.height = probe.naturalHeight;
+      const g = c.getContext('2d'); g.drawImage(probe, 0, 0);
+      const d = g.getImageData(probe.naturalWidth/2|0, probe.naturalHeight/2|0, 1, 1).data;
+      r([d[0], d[1], d[2]]);
+    };
+    probe.onerror = () => r(null);
+    probe.src = img.src;
+  });
+  truthy('G3 JPEG center pixel ~white', centerColor && centerColor[0] > 240 && centerColor[1] > 240 && centerColor[2] > 240);
+
+  // G4 switching format actually changes blob mime
+  await loadDefault(400, 300);
+  setSelect($('format'), 'image/webp'); await sleep(400);
+  // download href is what we'd save; check filename ext in click handler indirectly.
+  // We can fetch the blob via the preview img src
+  async function previewMime() {
+    const src = $('preview').querySelector('img').src;
+    const r = await fetch(src);
+    const b = await r.blob();
+    return b.type;
+  }
+  eq('G4 webp mime', await previewMime(), 'image/webp');
+  setSelect($('format'), 'image/jpeg'); await sleep(400);
+  eq('G4 jpeg mime', await previewMime(), 'image/jpeg');
+  setSelect($('format'), 'image/png'); await sleep(400);
+  eq('G4 png mime', await previewMime(), 'image/png');
+
+  // ---------------------- H. Target file size search ---------------------
+  await loadDefault(1696, 1131);
+  setSelect($('format'), 'image/webp');
+  setSelect($('strategy'), 'target');
+  await sleep(100);
+  setNum($('target-kb'), 100);
+  $('target-go').click();
+  // wait for "Searching..." -> "Find quality"
+  let searched = false;
+  for (let i = 0; i < 50; i++) {
+    if ($('target-go').textContent === 'Find quality' && !$('target-go').disabled) { searched = true; break; }
+    await sleep(100);
+  }
+  truthy('H1 search completes', searched);
+  {
+    const sz = metaSize(readState().meta);
+    truthy('H1 size under target', sz && sz <= 100 * 1024);
+  }
+  // H2 tiny target → error
+  setNum($('target-kb'), 1);
+  $('target-go').click();
+  await sleep(2500);
+  {
+    const s = readState();
+    falsy('H2 tiny target error visible', s.errorHidden);
+  }
+  // H3 PNG + target → error
+  setSelect($('format'), 'image/png');
+  setNum($('target-kb'), 100);
+  $('target-go').click();
+  await sleep(200);
+  {
+    const s = readState();
+    falsy('H3 PNG target error visible', s.errorHidden);
+    truthy('H3 PNG error mentions PNG', /PNG/i.test(s.errorText));
+  }
+
+  // ---------------------- I. Download filenames --------------------------
+  // We hijack <a>.click() to capture the download attribute without actually saving.
+  await loadDefault(1696, 1131);
+  setSelect($('format'), 'image/webp');
+  setSelect($('strategy'), 'quality');
+  let captured = null;
+  const origCreate = document.createElement.bind(document);
+  document.createElement = function (tag) {
+    const el = origCreate(tag);
+    if (tag.toLowerCase() === 'a') {
+      const origClick = el.click.bind(el);
+      el.click = function () { captured = el.download; };
+    }
+    return el;
+  };
+  // I2 exact mode filename
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 848);
+  await sleep(400);
+  $('download').click();
+  eq('I2 exact filename', captured, 'test_1696x1131_848x566.webp');
+
+  // I3 physical mode filename
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-w'), 4);
+  await sleep(400);
+  setSelect($('format'), 'image/jpeg'); await sleep(400);
+  $('download').click();
+  eq('I3 physical filename', captured, 'test_1696x1131_4x2.67in_300dpi.jpg');
+
+  // I4 dotted filename
+  await reset();
+  await loadBlob(await makePng(400, 300), 'v1.0.png');
+  await sleep(400);
+  setSelect($('format'), 'image/webp');
+  $('download').click();
+  eq('I4 dotted base preserved', captured, 'v1.0_400x300.webp');
+
+  // I5 no extension
+  await reset();
+  await loadBlob(await makePng(400, 300), 'screenshot');
+  await sleep(400);
+  $('download').click();
+  eq('I5 no-ext base preserved', captured, 'screenshot_400x300.webp');
+
+  document.createElement = origCreate;
+
+  // ---------------------- J. Reset ---------------------------------------
+  await loadDefault(800, 600);
+  $('reset').click();
+  await sleep(200);
+  {
+    const s = readState();
+    truthy('J1 drop visible', !s.dropHidden);
+    truthy('J1 controls hidden', s.controlsHidden);
+    truthy('J1 download disabled', s.downloadDisabled);
+    eq('J1 preview cleared', s.previewSrc, '');
+    eq('J1 meta cleared', s.meta, '');
+    truthy('J1 error hidden', s.errorHidden);
+    eq('J2 file input cleared', $('file').value, '');
+    // J3: reset must restore every form control to its default; otherwise
+    // the next dropped image inherits stale settings.
+    eq('J3 dim-mode default', $('dim-mode').value, 'none');
+    eq('J3 phys-dpi default', $('phys-dpi').value, '300');
+    eq('J3 phys-unit default', $('phys-unit').value, 'in');
+    eq('J3 format default', $('format').value, 'image/webp');
+    eq('J3 quality default', +$('quality').value, 80);
+    eq('J3 strategy default', $('strategy').value, 'quality');
+    eq('J3 target-kb default', $('target-kb').value, '500');
+    eq('J3 exact-w empty', $('exact-w').value, '');
+    eq('J3 exact-h empty', $('exact-h').value, '');
+    eq('J3 phys-w empty', $('phys-w').value, '');
+    eq('J3 phys-h empty', $('phys-h').value, '');
+  }
+
+  // ---------------------- K. Memory hygiene ------------------------------
+  // Track URL.createObjectURL/revokeObjectURL: if we render N times, only one
+  // URL should be live.
+  const created = [], revoked = [];
+  const oCreate = URL.createObjectURL, oRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = function (b) { const u = oCreate.call(URL, b); created.push(u); return u; };
+  URL.revokeObjectURL = function (u) { revoked.push(u); return oRevoke.call(URL, u); };
+  await loadDefault(800, 600);
+  for (let i = 0; i < 5; i++) {
+    setRange($('quality'), 50 + i * 5);
+    await sleep(150);
+  }
+  await sleep(400);
+  // We expect at least 5 creates and 4 revokes (last one stays live).
+  const aliveCount = created.length - revoked.length;
+  truthy('K1 only one URL alive at a time', aliveCount === 1);
+  $('reset').click();
+  await sleep(200);
+  truthy('K2 reset revokes live URL', created.length === revoked.length);
+  URL.createObjectURL = oCreate; URL.revokeObjectURL = oRevoke;
+
+  // ---------------------- L. Drag and drop -------------------------------
+  await reset();
+  const drop = $('drop');
+  drop.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true }));
+  truthy('L1 dragover adds .over', drop.classList.contains('over'));
+  drop.dispatchEvent(new DragEvent('dragleave', { bubbles: true }));
+  falsy('L2 dragleave removes .over', drop.classList.contains('over'));
+
+  // L3 drop event triggers loadFile
+  const dt = new DataTransfer();
+  const blob = await makePng(200, 200);
+  dt.items.add(new File([blob], 'dropped.png', { type: 'image/png' }));
+  const dropEvt = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt });
+  drop.dispatchEvent(dropEvt);
+  await sleep(500);
+  {
+    const s = readState();
+    truthy('L3 drop loaded file', !s.controlsHidden && s.exactW === 200);
+  }
+
+  // L4 window-level dragover/drop is preventDefault'd
+  const winDrop = new DragEvent('drop', { bubbles: true, cancelable: true });
+  const wasPrevented = !window.dispatchEvent(winDrop) || winDrop.defaultPrevented;
+  truthy('L4 window drop preventDefault', wasPrevented);
+
+  // ---------------------- Summary ----------------------------------------
+  const failed = results.filter(r => !r.ok);
+  return {
+    total: results.length,
+    passed: results.length - failed.length,
+    failedCount: failed.length,
+    failed,
+  };
+};
