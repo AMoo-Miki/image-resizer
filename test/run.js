@@ -116,7 +116,7 @@ window.__runTests = async function () {
     setVal('strategy', 'quality');
     setVal('quality', 80);
     setVal('target-kb', 500);
-    setVal('format', 'image/webp');
+    setVal('format', 'image/jpeg');
     if ($('phys-px-readout')) $('phys-px-readout').textContent = '';
     if ($('percent-val'))     $('percent-val').textContent = '50%';
     if ($('quality-val'))     $('quality-val').textContent = '80%';
@@ -626,18 +626,21 @@ window.__runTests = async function () {
   $('download').click();
   eq('I3 physical filename', captured, 'test_1696x1131_4x2.67in_300dpi.jpg');
 
-  // I4 dotted filename
+  // I4 dotted filename — explicitly switch to webp and wait for the
+  // re-encode (the download extension is taken from outputBlob.type, not
+  // format.value, so we need the new encoded blob to land first).
   await reset();
   await loadBlob(await makePng(400, 300), 'v1.0.png');
   await sleep(400);
-  setSelect($('format'), 'image/webp');
+  setSelect($('format'), 'image/webp'); await sleep(400);
   $('download').click();
   eq('I4 dotted base preserved', captured, 'v1.0_400x300.webp');
 
-  // I5 no extension
+  // I5 no extension — same pattern.
   await reset();
   await loadBlob(await makePng(400, 300), 'screenshot');
   await sleep(400);
+  setSelect($('format'), 'image/webp'); await sleep(400);
   $('download').click();
   eq('I5 no-ext base preserved', captured, 'screenshot_400x300.webp');
 
