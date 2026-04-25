@@ -49,6 +49,10 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+/* Author rules like `.row { display: flex }` would otherwise win over the
+   user-agent default `[hidden] { display: none }`. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
