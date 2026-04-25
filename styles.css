@@ -99,10 +99,10 @@ body {
 .logo-dot {
   width: 28px;
   height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-light));
+  border-radius: 6px;
   box-shadow: 0 0 0 4px var(--accent-glow);
   flex-shrink: 0;
+  display: block;
 }
 
 .app-footer {
