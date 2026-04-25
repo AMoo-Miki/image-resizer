@@ -10,7 +10,6 @@
   const dimMode = $('dim-mode');
   const percent = $('percent');
   const percentVal = $('percent-val');
-  const maxdim = $('maxdim');
   const exactW = $('exact-w');
   const exactH = $('exact-h');
   const physW = $('phys-w');
@@ -158,18 +157,6 @@
       return {
         w: Math.max(1, Math.round(originalW * p)),
         h: Math.max(1, Math.round(originalH * p)),
-      };
-    }
-
-    if (m === 'maxdim') {
-      const max = +maxdim.value;
-      if (!max || Math.max(originalW, originalH) <= max) {
-        return { w: originalW, h: originalH };
-      }
-      const r = max / Math.max(originalW, originalH);
-      return {
-        w: Math.max(1, Math.round(originalW * r)),
-        h: Math.max(1, Math.round(originalH * r)),
       };
     }
 
@@ -355,7 +342,6 @@
   // --- Dimension mode switching ------------------------------------------
   function syncDimRows() {
     $('row-percent').hidden = dimMode.value !== 'percent';
-    $('row-maxdim').hidden = dimMode.value !== 'maxdim';
     $('row-exact').hidden = dimMode.value !== 'exact';
     $('row-physical').hidden = dimMode.value !== 'physical';
     $('row-physical-dpi').hidden = dimMode.value !== 'physical';
@@ -369,7 +355,6 @@
     percentVal.textContent = percent.value + '%';
     debouncedRender();
   });
-  maxdim.addEventListener('input', debouncedRender);
 
   exactW.addEventListener('input', () => {
     if (suppressMirror) return;

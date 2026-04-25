@@ -6,7 +6,7 @@ Live: https://resizer.barahmand.com
 
 ## Features
 
-- Resize by **percentage**, **max longest side**, **exact pixel dimensions**, or **physical size + DPI** (e.g. `4 × 6 in @ 300 DPI` → `1200 × 1800 px`).
+- Resize by **percentage**, **exact pixel dimensions**, or **physical size + DPI** (e.g. `4 × 6 in @ 300 DPI` → `1200 × 1800 px`).
 - Aspect ratio is always locked to the source image — change one dimension, the other follows.
 - Output as **WebP**, **JPEG**, or **PNG**.
 - Manual quality slider, or "find the best quality that fits under N KB" (binary search).
