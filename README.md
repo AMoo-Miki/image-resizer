@@ -58,3 +58,7 @@ Pushes to `main` auto-deploy via `.github/workflows/pages.yml`. Configure a cust
 - EXIF orientation is honored by modern browsers when loading via `<img>`, but EXIF data and ICC color profiles are stripped on re-encode (wide-gamut images get clamped to sRGB).
 - Very large images (above ~16 MP on Safari, ~32k pixels per side on Chrome) may fail to encode.
 - Single file at a time, no batch.
+
+## License
+
+[BSD 3-Clause](LICENSE) © AMoo-Miki
