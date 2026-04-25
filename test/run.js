@@ -493,7 +493,7 @@ window.__runTests = async function () {
   setSelect($('format'), 'image/jpeg');
   await sleep(500);
   // Read the preview image's center pixel
-  const centerColor = await new Promise((r) => {
+  const g3CenterColor = await new Promise((r) => {
     const img = $('preview').querySelector('img');
     if (!img) return r(null);
     const probe = new Image();
@@ -507,7 +507,7 @@ window.__runTests = async function () {
     probe.onerror = () => r(null);
     probe.src = img.src;
   });
-  truthy('G3 JPEG center pixel ~white', centerColor && centerColor[0] > 240 && centerColor[1] > 240 && centerColor[2] > 240);
+  truthy('G3 JPEG center pixel ~white', g3CenterColor && g3CenterColor[0] > 240 && g3CenterColor[1] > 240 && g3CenterColor[2] > 240);
 
   // G4 switching format actually changes blob mime
   await loadDefault(400, 300);
@@ -683,6 +683,319 @@ window.__runTests = async function () {
   const winDrop = new DragEvent('drop', { bubbles: true, cancelable: true });
   const wasPrevented = !window.dispatchEvent(winDrop) || winDrop.defaultPrevented;
   truthy('L4 window drop preventDefault', wasPrevented);
+
+  // ---------------------- M. Real JPEG fixture ---------------------------
+  // Pull the on-disk Canon photo through the file-load path so we exercise
+  // the same FileReader+decodeImage pipeline a real user would hit.
+  async function loadFixture(path = '/test/fixtures/sample.jpg', name) {
+    await reset();
+    const r = await fetch(path);
+    const blob = await r.blob();
+    const prev = ($('preview').querySelector('img') || {}).src || '';
+    await loadBlob(blob, name || path.split('/').pop(), blob.type);
+    await waitForRender(prev, 3000);
+    return blob;
+  }
+  async function decodeImage(url) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight, img });
+      img.onerror = () => reject(new Error('decode failed'));
+      img.src = url;
+    });
+  }
+  function centerColor(decoded) {
+    const c = document.createElement('canvas');
+    c.width = decoded.w; c.height = decoded.h;
+    const g = c.getContext('2d'); g.drawImage(decoded.img, 0, 0);
+    const d = g.getImageData(decoded.w/2|0, decoded.h/2|0, 1, 1).data;
+    return [d[0], d[1], d[2]];
+  }
+
+  const sampleBlob = await loadFixture();
+  {
+    const s = readState();
+    eq('M1 sample dims', { w: s.exactW, h: s.exactH }, { w: 1696, h: 1131 });
+    falsy('M1 download enabled', s.downloadDisabled);
+    truthy('M1 preview present', !!s.previewSrc);
+    truthy('M1 originalSize visible in meta', /KB|MB/.test(s.meta));
+  }
+
+  // ---------------------- N. Output formats from real JPEG ---------------
+  setSelect($('dim-mode'), 'none');
+  setSelect($('strategy'), 'quality');
+  setRange($('quality'), 80);
+  await sleep(400);
+
+  async function previewBlob() {
+    const src = $('preview').querySelector('img').src;
+    const r = await fetch(src);
+    return r.blob();
+  }
+
+  for (const fmt of ['image/webp', 'image/jpeg', 'image/png']) {
+    setSelect($('format'), fmt);
+    // PNG of a 1696x1131 photo can take ~1-2s to encode
+    await sleep(fmt === 'image/png' ? 2000 : 800);
+    const b = await previewBlob();
+    eq(`N ${fmt} mime`, b.type, fmt);
+    truthy(`N ${fmt} size > 10KB`, b.size > 10 * 1024);
+    try {
+      const d = await decodeImage(URL.createObjectURL(b));
+      eq(`N ${fmt} decoded dims preserved`, { w: d.w, h: d.h }, { w: 1696, h: 1131 });
+    } catch {
+      fail(`N ${fmt} decoded dims preserved`, { msg: 'decode failed' });
+    }
+  }
+
+  // Compression sanity: WebP and JPEG should be smaller than original for a photo;
+  // PNG (lossless) of a photo is typically larger.
+  setSelect($('format'), 'image/webp'); await sleep(800);
+  const wbBlob = await previewBlob();
+  truthy('N WebP smaller than original (570KB)', wbBlob.size < 583739);
+  setSelect($('format'), 'image/jpeg'); setRange($('quality'), 80); await sleep(800);
+  const jpBlob = await previewBlob();
+  truthy('N JPEG q80 smaller than original', jpBlob.size < 583739);
+  setSelect($('format'), 'image/png'); await sleep(2000);
+  const pnBlob = await previewBlob();
+  truthy('N PNG of photo larger than original JPEG', pnBlob.size > 583739);
+
+  // Pixel-fidelity: encode to JPEG q95, decoded center pixel within tolerance.
+  setSelect($('format'), 'image/jpeg'); setRange($('quality'), 95); await sleep(800);
+  const reBlob = await previewBlob();
+  const reUrl = URL.createObjectURL(reBlob);
+  const origUrl = URL.createObjectURL(sampleBlob);
+  try {
+    const decReencoded = await decodeImage(reUrl);
+    const decOriginal = await decodeImage(origUrl);
+    const oC = centerColor(decOriginal), eC = centerColor(decReencoded);
+    const diff = Math.max(Math.abs(oC[0]-eC[0]), Math.abs(oC[1]-eC[1]), Math.abs(oC[2]-eC[2]));
+    truthy(`N JPEG q95 center pixel within 12 of original (orig=${oC} re=${eC} diff=${diff})`, diff <= 12);
+  } finally {
+    URL.revokeObjectURL(reUrl); URL.revokeObjectURL(origUrl);
+  }
+
+  // ---------------------- P. Very large image (encode failure) -----------
+  // Try a 16384x16384 canvas (~1GB raw). Most browsers refuse; the app should
+  // either succeed with a tiny JPEG or surface our "Encoding failed" error
+  // without crashing.
+  await reset();
+  let huge = null;
+  try {
+    huge = await new Promise((r) => {
+      const c = document.createElement('canvas'); c.width = 16384; c.height = 16384;
+      const g = c.getContext('2d'); g.fillStyle = '#888'; g.fillRect(0, 0, 16384, 16384);
+      c.toBlob(r, 'image/png');
+    });
+  } catch { huge = null; }
+  if (huge) {
+    await loadBlob(huge, 'huge.png');
+    setSelect($('dim-mode'), 'none');
+    setSelect($('format'), 'image/jpeg');
+    await sleep(3000);
+    const s = readState();
+    if (!s.errorHidden) {
+      truthy('P encode failure surfaced as error', /encoding failed/i.test(s.errorText));
+    } else {
+      pass('P large image encoded successfully (no error)');
+    }
+  } else {
+    pass('P canvas creation refused by browser (size limit)');
+  }
+
+  // ---------------------- Q. Reset during async target search ------------
+  await reset();
+  await loadFixture();
+  setSelect($('format'), 'image/webp');
+  setSelect($('strategy'), 'target');
+  setNum($('target-kb'), 200);
+  $('target-go').click();
+  await sleep(20); // let the search start (~1 encode in)
+  $('reset').click();
+  // Wait long enough for any in-flight encode iterations to finish.
+  await sleep(2500);
+  {
+    const s = readState();
+    truthy('Q reset wins: drop visible',     !s.dropHidden);
+    truthy('Q reset wins: controls hidden',  s.controlsHidden);
+    eq    ('Q reset wins: preview empty',    s.previewSrc, '');
+    eq    ('Q reset wins: meta empty',       s.meta, '');
+    truthy('Q reset wins: download disabled', s.downloadDisabled);
+  }
+
+  // Reset during a normal render() (changing format mid-load).
+  await reset();
+  await loadFixture();
+  setSelect($('format'), 'image/png'); // slow encode
+  await sleep(20);
+  $('reset').click();
+  await sleep(2500);
+  {
+    const s = readState();
+    truthy('Q reset during render: drop visible', !s.dropHidden);
+    eq    ('Q reset during render: preview empty', s.previewSrc, '');
+  }
+
+  // ---------------------- R. Multi-file drop / non-file drag --------------
+  await reset();
+  const dtMulti = new DataTransfer();
+  const f1 = await makePng(100, 100);
+  const f2 = await makePng(222, 222);
+  dtMulti.items.add(new File([f1], 'a.png', { type: 'image/png' }));
+  dtMulti.items.add(new File([f2], 'b.png', { type: 'image/png' }));
+  $('drop').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dtMulti }));
+  await sleep(500);
+  {
+    const s = readState();
+    truthy('R1 multi-drop loaded first file', !s.controlsHidden);
+    eq('R1 multi-drop dims = first file', { w: s.exactW, h: s.exactH }, { w: 100, h: 100 });
+  }
+  await reset();
+  $('drop').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }));
+  await sleep(200);
+  {
+    const s = readState();
+    truthy('R2 empty-payload drop: stays in initial state', s.controlsHidden);
+    truthy('R2 empty-payload drop: no error shown', s.errorHidden);
+  }
+
+  // ---------------------- S. syncing guard recovery ----------------------
+  // Force one syncDisplays() to throw (by making percent.value setter blow up
+  // once); after the throw, subsequent edits must still work, proving the
+  // try/finally restored the syncing flag.
+  await reset();
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  const valDesc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  let armed = true;
+  Object.defineProperty($('percent'), 'value', {
+    configurable: true,
+    set(v) { if (armed) { armed = false; throw new Error('boom'); } valDesc.set.call(this, v); },
+    get() { return valDesc.get.call(this); },
+  });
+  try { setNum($('exact-w'), 848); } catch {}
+  await sleep(200);
+  delete $('percent').value; // restore prototype getter/setter
+  setNum($('exact-w'), 1000);
+  await sleep(300);
+  {
+    const s = readState();
+    eq('S subsequent edit succeeds (no deadlock)', s.exactW, 1000);
+    // exact-h should also have been recomputed → 1000 / (1696/1131) ≈ 667
+    close('S subsequent edit syncs partner', s.exactH, 667, 1);
+  }
+
+  // ---------------------- T. Long-cycle hygiene --------------------------
+  // 30 load + reset cycles; nothing should accumulate in the DOM and no
+  // object URLs should leak. Reset to a known-clean baseline before
+  // patching counters so prior-suite state doesn't bias the totals.
+  await reset();
+  const created2 = [], revoked2 = [];
+  const oc2 = URL.createObjectURL, or2 = URL.revokeObjectURL;
+  URL.createObjectURL = function (b) { const u = oc2.call(URL, b); created2.push(u); return u; };
+  URL.revokeObjectURL = function (u) { revoked2.push(u); return or2.call(URL, u); };
+  for (let i = 0; i < 30; i++) {
+    await loadDefault(400, 300);
+    $('reset').click();
+    await sleep(40);
+  }
+  URL.createObjectURL = oc2; URL.revokeObjectURL = or2;
+  {
+    eq('T preview cleared after cycles', $('preview').children.length, 0);
+    eq('T file input cleared after cycles', $('file').value, '');
+    // We may have a few outstanding URLs from test plumbing (decodeImage), but
+    // the *app's* URLs should all be revoked by reset.
+    truthy(`T no leaked app URLs (${created2.length} created, ${revoked2.length} revoked)`,
+      created2.length === revoked2.length);
+  }
+
+  // ---------------------- U. Quality readout sync ------------------------
+  await reset();
+  await loadDefault(400, 300);
+  setSelect($('format'), 'image/jpeg');
+  for (const v of [1, 50, 73, 100]) {
+    setRange($('quality'), v);
+    eq(`U readout @${v}`, $('quality-val').textContent, v + '%');
+  }
+
+  // ---------------------- V. Mid-range percent precision ------------------
+  await reset();
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 1800);
+  await sleep(300);
+  eq('V 1800/1696 → 106%', readState().percentReadout, '106%');
+  setNum($('exact-w'), 700);
+  await sleep(300);
+  eq('V 700/1696 → 41%', readState().percentReadout, '41%');
+
+  // ---------------------- W. Keyboard tab order --------------------------
+  // None of the interactive controls should opt out of the tab sequence
+  // (tabindex="-1"). Drop zone uses tabindex="0" (verified in A2).
+  {
+    const ids = ['drop','dim-mode','percent','exact-w','exact-h','phys-w','phys-h',
+                 'phys-unit','phys-dpi','strategy','quality','target-kb','target-go',
+                 'format','download','reset'];
+    const offenders = [];
+    for (const id of ids) {
+      const el = $(id);
+      if (!el) { offenders.push(`${id} missing`); continue; }
+      const ti = el.getAttribute('tabindex');
+      if (ti && +ti < 0) offenders.push(`${id}=${ti}`);
+    }
+    truthy(`W all interactive controls tabbable (${offenders.join(', ') || 'ok'})`,
+      offenders.length === 0);
+  }
+
+  // ---------------------- X. ARIA basics ---------------------------------
+  {
+    const errEl = $('error');
+    eq('X error has role=status', errEl.getAttribute('role'), 'status');
+    eq('X error has aria-live=polite', errEl.getAttribute('aria-live'), 'polite');
+    const inputs = ['dim-mode','percent','exact-w','exact-h','phys-w','phys-h',
+                    'phys-unit','phys-dpi','strategy','quality','target-kb','format'];
+    const unlabeled = inputs.filter(id => {
+      const el = document.getElementById(id);
+      const hasFor = !!document.querySelector(`label[for="${id}"]`);
+      const hasAria = el && (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby'));
+      return !hasFor && !hasAria;
+    });
+    truthy(`X all form inputs have a label or aria-label: missing=[${unlabeled.join(',')}]`,
+      unlabeled.length === 0);
+  }
+
+  // ---------------------- Y. DPI metadata absence ------------------------
+  // Canvas.toBlob doesn't write a pHYs chunk (PNG) or a JFIF density (JPEG).
+  // Verify by parsing the output bytes; if a future browser starts writing
+  // these, we want to know.
+  await reset();
+  await loadDefault(50, 50);
+  setSelect($('format'), 'image/png'); await sleep(300);
+  {
+    const buf = new Uint8Array(await (await previewBlob()).arrayBuffer());
+    let hasPhys = false;
+    for (let i = 8; i < buf.length - 4; i++) {
+      if (buf[i]===0x70 && buf[i+1]===0x48 && buf[i+2]===0x59 && buf[i+3]===0x73) { hasPhys = true; break; }
+    }
+    truthy('Y PNG has no pHYs (DPI) chunk — encoding strips DPI as documented', !hasPhys);
+  }
+  setSelect($('format'), 'image/jpeg'); await sleep(300);
+  {
+    const buf = new Uint8Array(await (await previewBlob()).arrayBuffer());
+    // JFIF marker FF E0 then 'JFIF\0'; bytes 11-12 are units, 13-14 Xdens, 15-16 Ydens.
+    let xd = -1, yd = -1, units = -1;
+    for (let i = 0; i < buf.length - 16; i++) {
+      if (buf[i]===0xFF && buf[i+1]===0xE0 &&
+          buf[i+4]===0x4A && buf[i+5]===0x46 && buf[i+6]===0x49 && buf[i+7]===0x46 && buf[i+8]===0x00) {
+        units = buf[i+11];
+        xd = (buf[i+12] << 8) | buf[i+13];
+        yd = (buf[i+14] << 8) | buf[i+15];
+        break;
+      }
+    }
+    // units=0 means "no units; aspect only" → effectively no DPI metadata.
+    truthy(`Y JPEG JFIF units=${units} (0 = no DPI metadata) X=${xd} Y=${yd}`, units === 0);
+  }
 
   // ---------------------- Summary ----------------------------------------
   const failed = results.filter(r => !r.ok);

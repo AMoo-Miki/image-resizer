@@ -40,6 +40,11 @@
   let outputUrl = null;
   let debounceTimer = null;
 
+  // Bumped on every load and reset. Async work captures it on entry and
+  // bails on resolve if it no longer matches, so a slow encode can't
+  // overwrite a freshly-reset UI.
+  let currentGen = 0;
+
   // Canonical target. Every dimension control is a different view of these two numbers.
   let targetW = 0;
   let targetH = 0;
@@ -154,25 +159,27 @@
   function syncDisplays(skip) {
     if (!originalW || !originalH) return;
     syncing = true;
+    try {
+      if (skip !== percent) {
+        const realPct = targetW / originalW * 100;
+        const sliderPct = clamp(realPct, +percent.min, +percent.max);
+        setIfChanged(percent, Math.round(sliderPct));
+      }
+      // The percent readout always shows the *real* percentage (even if the slider is pinned).
+      percentVal.textContent = Math.round(targetW / originalW * 100) + '%';
 
-    if (skip !== percent) {
-      const realPct = targetW / originalW * 100;
-      const sliderPct = clamp(realPct, +percent.min, +percent.max);
-      setIfChanged(percent, Math.round(sliderPct));
+      if (skip !== exactW) setIfChanged(exactW, targetW);
+      if (skip !== exactH) setIfChanged(exactH, targetH);
+
+      const k = pxPerUnit();
+      if (skip !== physW) setIfChanged(physW, +(targetW / k).toFixed(2));
+      if (skip !== physH) setIfChanged(physH, +(targetH / k).toFixed(2));
+
+      physPxReadout.textContent = `→ ${targetW} × ${targetH} px`;
+    } finally {
+      // try/finally so a thrown setter never leaves the UI deadlocked.
+      syncing = false;
     }
-    // The percent readout always shows the *real* percentage (even if the slider is pinned).
-    percentVal.textContent = Math.round(targetW / originalW * 100) + '%';
-
-    if (skip !== exactW) setIfChanged(exactW, targetW);
-    if (skip !== exactH) setIfChanged(exactH, targetH);
-
-    const k = pxPerUnit();
-    if (skip !== physW) setIfChanged(physW, +(targetW / k).toFixed(2));
-    if (skip !== physH) setIfChanged(physH, +(targetH / k).toFixed(2));
-
-    physPxReadout.textContent = `→ ${targetW} × ${targetH} px`;
-
-    syncing = false;
   }
 
   // --- File loading -------------------------------------------------------
@@ -197,6 +204,7 @@
         );
       };
       img.onload = () => {
+        currentGen++;
         original = img;
         originalW = img.naturalWidth;
         originalH = img.naturalHeight;
@@ -273,10 +281,12 @@
   async function render() {
     if (!original) return;
     clearError();
+    const gen = currentGen;
     const { canvas, w, h } = drawCanvas();
     const type = format.value;
     const q = +quality.value / 100;
     const blob = await encode(canvas, type, q);
+    if (gen !== currentGen) return; // reset/reload happened mid-encode
     if (!blob) {
       showError('Encoding failed. The image may be too large for this browser.');
       downloadBtn.disabled = true;
@@ -305,6 +315,7 @@
       return;
     }
 
+    const gen = currentGen;
     const { canvas, w, h } = drawCanvas();
     targetGo.disabled = true;
     targetGo.textContent = 'Searching...';
@@ -313,6 +324,11 @@
     for (let i = 0; i < 10; i++) {
       const mid = Math.round((lo + hi) / 2);
       const blob = await encode(canvas, type, mid / 100);
+      if (gen !== currentGen) {
+        targetGo.disabled = false;
+        targetGo.textContent = 'Find quality';
+        return;
+      }
       if (!blob) break;
       if (blob.size <= targetBytes) {
         best = blob;
@@ -327,8 +343,11 @@
     targetGo.disabled = false;
     targetGo.textContent = 'Find quality';
 
+    if (gen !== currentGen) return;
+
     if (!best) {
       const blob = await encode(canvas, type, 0.01);
+      if (gen !== currentGen) return;
       showError(
         `Can't reach ${targetKb.value} KB even at quality 1 ` +
         `(got ${fmtBytes(blob ? blob.size : 0)} at ${w}×${h}). Try shrinking the dimensions further.`
@@ -466,6 +485,7 @@
   });
 
   resetBtn.addEventListener('click', () => {
+    currentGen++;
     if (outputUrl) URL.revokeObjectURL(outputUrl);
     original = null;
     originalW = originalH = 0;
