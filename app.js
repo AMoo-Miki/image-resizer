@@ -98,13 +98,9 @@
   }
 
   // --- Canonical setters --------------------------------------------------
-  // Each one re-derives (targetW, targetH) from the input being edited.
-  // Aspect ratio is always locked to the source image.
-
-  // Each setter returns true on a valid edit (canonical updated) or false on
-  // an invalid one (empty/zero) so callers know to skip syncing the other
-  // fields. This prevents mid-typing inputs from collapsing every other
-  // dimension to 1.
+  // Each setter re-derives (targetW, targetH) from one input, locking aspect
+  // ratio to the source. Returns false on empty/invalid input so callers can
+  // skip the sync — without this, mid-typing collapses every partner field to 1.
 
   function setFromPercent() {
     const p = (+percent.value || 0) / 100;
@@ -218,11 +214,9 @@
         originalW = img.naturalWidth;
         originalH = img.naturalHeight;
 
-        // Default canonical = source dims, then let the active mode (which may
-        // have come from a remembered preference like "percent=50") re-derive
-        // the canonical from its own control value. Image-specific inputs
-        // (exact-w/h, phys-w/h) are blank after reset, so their setters
-        // return false and leave the source-dims default in place.
+        // Seed canonical to source, then let the remembered mode override it
+        // (e.g. "percent=50" shrinks; image-specific inputs are blank so their
+        // setters bail and leave the source-dims default).
         setFromKeepOriginal();
         recomputeFromActiveMode();
         syncDisplays();
@@ -421,8 +415,6 @@
     debouncedRender();
   });
 
-  // Generic input handler factory: take input from `editor`, apply `setter`,
-  // sync everything else, render.
   function bindEdit(editor, setter) {
     editor.addEventListener('input', () => {
       if (syncing || !original) return;
@@ -549,7 +541,6 @@
     }
   }
 
-  // Restore persisted prefs into form controls and refresh dependent UI.
   function applyPrefs() {
     const p = loadPrefs();
     if (p) {
@@ -578,7 +569,6 @@
     el.addEventListener('input', savePrefs);
   }
 
-  // Initial UI state — apply persisted prefs (or factory defaults).
   applyPrefs();
 
   // Test hook: tests need to invoke applyPrefs after seeding localStorage to
