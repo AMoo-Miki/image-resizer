@@ -34,13 +34,19 @@
   let original = null;
   let originalW = 0;
   let originalH = 0;
-  let originalType = '';
   let originalSize = 0;
   let originalName = '';
   let outputBlob = null;
   let outputUrl = null;
   let debounceTimer = null;
-  let suppressMirror = false;
+
+  // Canonical target. Every dimension control is a different view of these two numbers.
+  let targetW = 0;
+  let targetH = 0;
+
+  // Re-entrancy guard so that programmatic input updates don't fire input events
+  // we'd then react to. (We still set values, but the listener bails early.)
+  let syncing = false;
 
   function fmtBytes(n) {
     if (n < 1024) return n + ' B';
@@ -57,44 +63,95 @@
     errBox.textContent = '';
   }
 
-  // --- Aspect ratio helpers (always locked to source) ---------------------
   function ratio() {
     return originalW && originalH ? originalW / originalH : 1;
-  }
-  function setIfChanged(input, val) {
-    const next = String(val);
-    if (input.value !== next) input.value = next;
-  }
-
-  function mirrorExactFromW() {
-    if (!originalW) return;
-    const w = +exactW.value || 0;
-    setIfChanged(exactH, Math.max(1, Math.round(w / ratio())));
-  }
-  function mirrorExactFromH() {
-    if (!originalH) return;
-    const h = +exactH.value || 0;
-    setIfChanged(exactW, Math.max(1, Math.round(h * ratio())));
   }
 
   function pxPerUnit() {
     const dpi = Math.max(1, +physDpi.value || 1);
     return physUnit.value === 'cm' ? dpi / 2.54 : dpi;
   }
-  function mirrorPhysFromW() {
-    if (!originalW) return;
-    const w = +physW.value || 0;
-    setIfChanged(physH, +(w / ratio()).toFixed(2));
-  }
-  function mirrorPhysFromH() {
-    if (!originalH) return;
-    const h = +physH.value || 0;
-    setIfChanged(physW, +(h * ratio()).toFixed(2));
+
+  function clamp(n, lo, hi) {
+    return Math.min(hi, Math.max(lo, n));
   }
 
-  function updatePhysReadout() {
-    const { w, h } = targetDims();
-    physPxReadout.textContent = `→ ${w} × ${h} px`;
+  function setIfChanged(input, val) {
+    const next = String(val);
+    if (input.value !== next) input.value = next;
+  }
+
+  // --- Canonical setters --------------------------------------------------
+  // Each one re-derives (targetW, targetH) from the input being edited.
+  // Aspect ratio is always locked to the source image.
+
+  function setFromPercent() {
+    const p = (+percent.value || 0) / 100;
+    targetW = Math.max(1, Math.round(originalW * p));
+    targetH = Math.max(1, Math.round(originalH * p));
+  }
+
+  function setFromExactW() {
+    targetW = Math.max(1, +exactW.value || 1);
+    targetH = Math.max(1, Math.round(targetW / ratio()));
+  }
+  function setFromExactH() {
+    targetH = Math.max(1, +exactH.value || 1);
+    targetW = Math.max(1, Math.round(targetH * ratio()));
+  }
+
+  function setFromPhysW() {
+    const k = pxPerUnit();
+    targetW = Math.max(1, Math.round((+physW.value || 0) * k));
+    targetH = Math.max(1, Math.round(targetW / ratio()));
+  }
+  function setFromPhysH() {
+    const k = pxPerUnit();
+    targetH = Math.max(1, Math.round((+physH.value || 0) * k));
+    targetW = Math.max(1, Math.round(targetH * ratio()));
+  }
+
+  function setFromKeepOriginal() {
+    targetW = originalW;
+    targetH = originalH;
+  }
+
+  // Recompute canonical pixels from the currently visible mode (e.g. when DPI
+  // changes in physical mode, the physical numbers stay the same but the pixel
+  // target moves).
+  function recomputeFromActiveMode() {
+    const m = dimMode.value;
+    if (m === 'percent') setFromPercent();
+    else if (m === 'exact') setFromExactW();
+    else if (m === 'physical') setFromPhysW();
+    else setFromKeepOriginal();
+  }
+
+  // --- Sync display fields from canonical ---------------------------------
+  // `skip` is the input the user is actively editing; we leave it alone so
+  // their caret/typed value isn't clobbered.
+  function syncDisplays(skip) {
+    if (!originalW || !originalH) return;
+    syncing = true;
+
+    if (skip !== percent) {
+      const realPct = targetW / originalW * 100;
+      const sliderPct = clamp(realPct, +percent.min, +percent.max);
+      setIfChanged(percent, Math.round(sliderPct));
+    }
+    // The percent readout always shows the *real* percentage (even if the slider is pinned).
+    percentVal.textContent = Math.round(targetW / originalW * 100) + '%';
+
+    if (skip !== exactW) setIfChanged(exactW, targetW);
+    if (skip !== exactH) setIfChanged(exactH, targetH);
+
+    const k = pxPerUnit();
+    if (skip !== physW) setIfChanged(physW, +(targetW / k).toFixed(2));
+    if (skip !== physH) setIfChanged(physH, +(targetH / k).toFixed(2));
+
+    physPxReadout.textContent = `→ ${targetW} × ${targetH} px`;
+
+    syncing = false;
   }
 
   // --- File loading -------------------------------------------------------
@@ -106,7 +163,6 @@
       return;
     }
     originalName = f.name;
-    originalType = f.type;
     originalSize = f.size;
 
     const reader = new FileReader();
@@ -124,22 +180,11 @@
         originalW = img.naturalWidth;
         originalH = img.naturalHeight;
 
-        // Seed exact mode at source dims
-        suppressMirror = true;
-        exactW.value = originalW;
-        exactH.value = originalH;
-
-        // Seed physical mode preserving source aspect at current DPI/unit
-        const k = pxPerUnit();
-        const physW0 = +(originalW / k).toFixed(2);
-        const physH0 = +(originalH / k).toFixed(2);
-        physW.value = physW0;
-        physH.value = physH0;
-        suppressMirror = false;
+        setFromKeepOriginal();
+        syncDisplays();
 
         controls.hidden = false;
         drop.hidden = true;
-        updatePhysReadout();
         render();
       };
       img.src = e.target.result;
@@ -147,44 +192,13 @@
     reader.readAsDataURL(f);
   }
 
-  // --- Sizing -------------------------------------------------------------
-  function targetDims() {
-    const m = dimMode.value;
-    if (m === 'none') return { w: originalW, h: originalH };
-
-    if (m === 'percent') {
-      const p = +percent.value / 100;
-      return {
-        w: Math.max(1, Math.round(originalW * p)),
-        h: Math.max(1, Math.round(originalH * p)),
-      };
-    }
-
-    if (m === 'exact') {
-      return {
-        w: Math.max(1, +exactW.value || 1),
-        h: Math.max(1, +exactH.value || 1),
-      };
-    }
-
-    if (m === 'physical') {
-      const k = pxPerUnit();
-      return {
-        w: Math.max(1, Math.round((+physW.value || 0) * k)),
-        h: Math.max(1, Math.round((+physH.value || 0) * k)),
-      };
-    }
-
-    return { w: originalW, h: originalH };
-  }
-
+  // --- Sizing / encoding --------------------------------------------------
   function drawCanvas() {
-    const { w, h } = targetDims();
+    const w = targetW, h = targetH;
     const canvas = document.createElement('canvas');
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext('2d');
-    // JPEG has no alpha — fill white so transparent PNGs don't go black.
     if (format.value === 'image/jpeg') {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, w, h);
@@ -218,7 +232,6 @@
       const hp = (+physH.value || 0).toFixed(2);
       return `<br>Print size: <strong>${wp} × ${hp} ${u}</strong> @ <strong>${dpi} DPI</strong>`;
     }
-    // For other modes, show what the file would print at if interpreted at 96 DPI
     const inW = (w / 96).toFixed(2);
     const inH = (h / 96).toFixed(2);
     return `<br>If printed at 96 DPI: ${inW} × ${inH} in`;
@@ -253,7 +266,6 @@
     outputUrl = URL.createObjectURL(blob);
     preview.innerHTML = `<img src="${outputUrl}" alt="preview">`;
     updateMeta(blob, w, h);
-    if (dimMode.value === 'physical') updatePhysReadout();
     downloadBtn.disabled = false;
   }
 
@@ -334,8 +346,6 @@
   file.addEventListener('change', (e) => {
     if (e.target.files[0]) loadFile(e.target.files[0]);
   });
-
-  // Prevent the browser from navigating away if a file is dropped outside the zone
   window.addEventListener('dragover', (e) => e.preventDefault());
   window.addEventListener('drop', (e) => e.preventDefault());
 
@@ -346,59 +356,51 @@
     $('row-physical').hidden = dimMode.value !== 'physical';
     $('row-physical-dpi').hidden = dimMode.value !== 'physical';
   }
+
   dimMode.addEventListener('change', () => {
     syncDimRows();
+    if (dimMode.value === 'none') {
+      setFromKeepOriginal();
+      syncDisplays();
+    }
     debouncedRender();
   });
 
-  percent.addEventListener('input', () => {
-    percentVal.textContent = percent.value + '%';
-    debouncedRender();
-  });
+  // Generic input handler factory: take input from `editor`, apply `setter`,
+  // sync everything else, render.
+  function bindEdit(editor, setter) {
+    editor.addEventListener('input', () => {
+      if (syncing || !original) return;
+      setter();
+      syncDisplays(editor);
+      debouncedRender();
+    });
+  }
 
-  exactW.addEventListener('input', () => {
-    if (suppressMirror) return;
-    mirrorExactFromW();
-    debouncedRender();
-  });
-  exactH.addEventListener('input', () => {
-    if (suppressMirror) return;
-    mirrorExactFromH();
-    debouncedRender();
-  });
+  bindEdit(percent, setFromPercent);
+  bindEdit(exactW, setFromExactW);
+  bindEdit(exactH, setFromExactH);
+  bindEdit(physW, setFromPhysW);
+  bindEdit(physH, setFromPhysH);
 
-  physW.addEventListener('input', () => {
-    if (suppressMirror) return;
-    mirrorPhysFromW();
-    updatePhysReadout();
-    debouncedRender();
-  });
-  physH.addEventListener('input', () => {
-    if (suppressMirror) return;
-    mirrorPhysFromH();
-    updatePhysReadout();
-    debouncedRender();
-  });
+  // DPI change in physical mode: physical-W/H stay the same, but the pixel
+  // target scales. Recompute canonical from physical-W (which uses the new DPI)
+  // and propagate to all other displays.
   physDpi.addEventListener('input', () => {
-    updatePhysReadout();
+    if (syncing || !original) return;
+    setFromPhysW();
+    syncDisplays(physDpi);
     debouncedRender();
   });
-  // Track the previous unit so we can convert numbers when the user toggles in/cm,
-  // keeping the resulting pixel dimensions unchanged.
+
+  // Unit change: pixel target stays the same; only the displayed physical
+  // numbers change (re-derived from canonical / new pxPerUnit).
   let lastUnit = physUnit.value;
   physUnit.addEventListener('change', () => {
-    const newUnit = physUnit.value;
-    if (newUnit !== lastUnit && +physW.value && +physH.value) {
-      const factor = (lastUnit === 'in' && newUnit === 'cm') ? 2.54
-                   : (lastUnit === 'cm' && newUnit === 'in') ? 1 / 2.54
-                   : 1;
-      suppressMirror = true;
-      physW.value = +(+physW.value * factor).toFixed(2);
-      physH.value = +(+physH.value * factor).toFixed(2);
-      suppressMirror = false;
-    }
-    lastUnit = newUnit;
-    updatePhysReadout();
+    if (!original) { lastUnit = physUnit.value; return; }
+    // Canonical (targetW/H) is unchanged on unit toggle by design.
+    syncDisplays();
+    lastUnit = physUnit.value;
     debouncedRender();
   });
 
@@ -423,7 +425,6 @@
     if (!outputBlob) return;
     const ext = outputBlob.type.split('/')[1].replace('jpeg', 'jpg');
     const base = originalName.replace(/\.[^.]+$/, '');
-    const { w, h } = targetDims();
     let suffix;
     if (dimMode.value === 'physical') {
       const u = physUnit.value;
@@ -432,7 +433,7 @@
       const hp = (+physH.value || 0).toFixed(2).replace(/\.?0+$/, '');
       suffix = `${wp}x${hp}${u}_${dpi}dpi`;
     } else {
-      suffix = `${w}x${h}`;
+      suffix = `${targetW}x${targetH}`;
     }
     const a = document.createElement('a');
     a.href = outputUrl;
@@ -445,6 +446,8 @@
   resetBtn.addEventListener('click', () => {
     if (outputUrl) URL.revokeObjectURL(outputUrl);
     original = null;
+    originalW = originalH = 0;
+    targetW = targetH = 0;
     outputBlob = null;
     outputUrl = null;
     file.value = '';
@@ -456,7 +459,7 @@
     clearError();
   });
 
-  // Initial UI sync (in case browser remembers select values)
+  // Initial UI state
   syncDimRows();
   $('row-quality').hidden = strategy.value !== 'quality';
   $('row-target').hidden = strategy.value !== 'target';
