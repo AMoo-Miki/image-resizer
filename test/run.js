@@ -90,10 +90,43 @@ window.__runTests = async function () {
     return ($('preview').querySelector('img') || {}).src || '';
   }
 
+  // Test-only "factory reset": real users don't get this. We need it because
+  // the app's Reset button now intentionally preserves preferences across
+  // images, so prior-suite settings would leak into the next suite without
+  // an explicit clean slate.
   async function reset() {
     if (!$('reset')) return;
     if (!$('controls').hidden) $('reset').click();
-    await sleep(50);
+    // Wipe persisted prefs first — otherwise the assignments below would
+    // immediately re-save the *post-assignment* values back to storage, but
+    // we want the storage to be EMPTY so the next applyPrefs sees nothing.
+    try { localStorage.removeItem('image-resizer-prefs-v1'); } catch {}
+    const setVal = (id, v) => {
+      const el = $(id);
+      if (el && el.value !== String(v)) el.value = v;
+    };
+    setVal('dim-mode', 'none');
+    setVal('percent', 50);
+    setVal('exact-w', '');
+    setVal('exact-h', '');
+    setVal('phys-w', '');
+    setVal('phys-h', '');
+    setVal('phys-unit', 'in');
+    setVal('phys-dpi', 300);
+    setVal('strategy', 'quality');
+    setVal('quality', 80);
+    setVal('target-kb', 500);
+    setVal('format', 'image/webp');
+    if ($('phys-px-readout')) $('phys-px-readout').textContent = '';
+    if ($('percent-val'))     $('percent-val').textContent = '50%';
+    if ($('quality-val'))     $('quality-val').textContent = '80%';
+    if ($('quality'))         $('quality').disabled = false;
+    // Refresh row visibility via the app's own listeners.
+    if (window.__imageResizerInternals) window.__imageResizerInternals.applyPrefs();
+    // Final wipe: applyPrefs read empty storage but our setVal calls did not
+    // touch storage either (programmatic .value assignments don't fire events).
+    try { localStorage.removeItem('image-resizer-prefs-v1'); } catch {}
+    await sleep(40);
   }
 
   async function loadDefault(w = 1696, h = 1131) {
@@ -610,8 +643,20 @@ window.__runTests = async function () {
 
   document.createElement = origCreate;
 
-  // ---------------------- J. Reset ---------------------------------------
+  // ---------------------- J. Reset preserves preferences -----------------
+  // The Reset button is labeled "Choose another"; it clears the IMAGE
+  // (preview, meta, image-specific dimension fields, file input) but keeps
+  // user preferences so the next image inherits dim-mode, format, quality, etc.
+  await reset();
   await loadDefault(800, 600);
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-dpi'), 600);
+  setSelect($('phys-unit'), 'cm');
+  setSelect($('format'), 'image/jpeg');
+  setRange($('quality'), 60);
+  setSelect($('strategy'), 'target');
+  setNum($('target-kb'), 250);
+  await sleep(300);
   $('reset').click();
   await sleep(200);
   {
@@ -619,28 +664,148 @@ window.__runTests = async function () {
     truthy('J1 drop visible', !s.dropHidden);
     truthy('J1 controls hidden', s.controlsHidden);
     truthy('J1 download disabled', s.downloadDisabled);
-    eq('J1 preview cleared', s.previewSrc, '');
-    eq('J1 meta cleared', s.meta, '');
+    eq    ('J1 preview cleared', s.previewSrc, '');
+    eq    ('J1 meta cleared', s.meta, '');
     truthy('J1 error hidden', s.errorHidden);
-    eq('J2 file input cleared', $('file').value, '');
-    // J3: reset must restore every form control to its default; otherwise
-    // the next dropped image inherits stale settings.
-    eq('J3 dim-mode default', $('dim-mode').value, 'none');
-    eq('J3 phys-dpi default', $('phys-dpi').value, '300');
-    eq('J3 phys-unit default', $('phys-unit').value, 'in');
-    eq('J3 format default', $('format').value, 'image/webp');
-    eq('J3 quality default', +$('quality').value, 80);
-    eq('J3 strategy default', $('strategy').value, 'quality');
-    eq('J3 target-kb default', $('target-kb').value, '500');
-    eq('J3 exact-w empty', $('exact-w').value, '');
-    eq('J3 exact-h empty', $('exact-h').value, '');
-    eq('J3 phys-w empty', $('phys-w').value, '');
-    eq('J3 phys-h empty', $('phys-h').value, '');
+    eq    ('J2 file input cleared', $('file').value, '');
+    // Image-specific dimension fields cleared.
+    eq('J3 exact-w cleared',  $('exact-w').value, '');
+    eq('J3 exact-h cleared',  $('exact-h').value, '');
+    eq('J3 phys-w cleared',   $('phys-w').value,  '');
+    eq('J3 phys-h cleared',   $('phys-h').value,  '');
+    // Preferences PRESERVED across reset.
+    eq('J4 dim-mode preserved',  $('dim-mode').value,  'physical');
+    eq('J4 phys-dpi preserved',  $('phys-dpi').value,  '600');
+    eq('J4 phys-unit preserved', $('phys-unit').value, 'cm');
+    eq('J4 format preserved',    $('format').value,    'image/jpeg');
+    eq('J4 quality preserved',   +$('quality').value,  60);
+    eq('J4 strategy preserved',  $('strategy').value,  'target');
+    eq('J4 target-kb preserved', $('target-kb').value, '250');
+  }
+
+  // ---------------------- Z. Persistence (localStorage) ------------------
+  const STORAGE_KEY = 'image-resizer-prefs-v1';
+
+  // Z1 — touching a remembered control writes to localStorage.
+  await reset();
+  setSelect($('dim-mode'), 'percent');
+  setSelect($('format'),   'image/jpeg');
+  setNum   ($('phys-dpi'), 240);
+  setRange ($('quality'),  65);
+  await sleep(80);
+  {
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    eq('Z1 dim-mode persisted', stored['dim-mode'], 'percent');
+    eq('Z1 format persisted',   stored['format'],   'image/jpeg');
+    eq('Z1 phys-dpi persisted', stored['phys-dpi'], '240');
+    eq('Z1 quality persisted',  stored['quality'],  '65');
+  }
+
+  // Z2 — image-specific fields are NEVER persisted (no exact-w, no phys-w).
+  await reset();
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  setNum($('exact-w'), 800);
+  await sleep(150);
+  setSelect($('dim-mode'), 'physical');
+  setNum($('phys-w'), 4);
+  await sleep(150);
+  {
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    falsy('Z2 exact-w not persisted', 'exact-w' in stored);
+    falsy('Z2 exact-h not persisted', 'exact-h' in stored);
+    falsy('Z2 phys-w not persisted',  'phys-w'  in stored);
+    falsy('Z2 phys-h not persisted',  'phys-h'  in stored);
+  }
+
+  // Z3 — applyPrefs restores from localStorage (simulates a page reload).
+  await reset();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    'dim-mode': 'physical',
+    'phys-dpi': '450',
+    'phys-unit': 'cm',
+    'format':    'image/png',
+    'quality':   '50',
+    'strategy':  'target',
+    'target-kb': '300',
+    'percent':   '75',
+  }));
+  window.__imageResizerInternals.applyPrefs();
+  {
+    eq('Z3 dim-mode restored',  $('dim-mode').value,  'physical');
+    eq('Z3 phys-dpi restored',  $('phys-dpi').value,  '450');
+    eq('Z3 phys-unit restored', $('phys-unit').value, 'cm');
+    eq('Z3 format restored',    $('format').value,    'image/png');
+    eq('Z3 quality restored',   +$('quality').value,  50);
+    eq('Z3 strategy restored',  $('strategy').value,  'target');
+    eq('Z3 target-kb restored', $('target-kb').value, '300');
+    eq('Z3 percent restored',   +$('percent').value,  75);
+    // Derived UI also updates.
+    truthy('Z3 quality slider disabled (PNG)',     $('quality').disabled);
+    eq    ('Z3 quality readout matches',           $('quality-val').textContent, '50%');
+    eq    ('Z3 percent readout matches',           $('percent-val').textContent, '75%');
+    // Row visibility reflects restored mode/strategy.
+    eq('Z3 physical row visible',  $('row-physical').hidden,     false);
+    eq('Z3 target row visible',    $('row-target').hidden,       false);
+    eq('Z3 quality row hidden',    $('row-quality').hidden,      true);
+  }
+
+  // Z4 — corrupted localStorage doesn't crash; falls back to factory defaults.
+  await reset();
+  localStorage.setItem(STORAGE_KEY, '{not-valid-json');
+  let crashed = false;
+  try { window.__imageResizerInternals.applyPrefs(); } catch { crashed = true; }
+  truthy('Z4 corrupt storage: applyPrefs does not throw', !crashed);
+  eq('Z4 corrupt storage: dim-mode = factory default', $('dim-mode').value, 'none');
+
+  // loadAfterPrefs: like loadDefault, but does NOT call reset() (which would
+  // wipe the localStorage we just seeded). Use this for Z5+ where the whole
+  // point is to verify that prefs survive into a freshly-loaded image.
+  async function loadAfterPrefs(w, h) {
+    if (!$('controls').hidden) {
+      $('reset').click();
+      await sleep(60);
+    }
+    const blob = await makePng(w, h);
+    const prevSrc = ($('preview').querySelector('img') || {}).src || '';
+    await loadBlob(blob, 'pref-test.png');
+    await waitForRender(prevSrc);
+  }
+
+  // Z5 — newly-loaded image inherits remembered dim-mode + percent.
+  await reset();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    'dim-mode': 'percent', 'percent': '50',
+  }));
+  window.__imageResizerInternals.applyPrefs();
+  await loadAfterPrefs(1696, 1131);
+  {
+    const s = readState();
+    eq('Z5 percent applied to new image: exactW', s.exactW, 848);
+    eq('Z5 percent applied to new image: exactH', s.exactH, 566);
+    eq('Z5 percent slider stays at 50',           s.percentSlider, 50);
+  }
+
+  // Z6 — newly-loaded image inherits remembered DPI/unit (physical mode
+  // with no remembered phys-w/h still derives sensible numbers).
+  await reset();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    'dim-mode': 'physical', 'phys-dpi': '600', 'phys-unit': 'in',
+  }));
+  window.__imageResizerInternals.applyPrefs();
+  await loadAfterPrefs(1200, 600); // 2:1 image at 600 DPI = 2 × 1 in
+  {
+    const s = readState();
+    eq('Z6 dpi applied: exactW unchanged (no phys-w override)', s.exactW, 1200);
+    close('Z6 dpi computes phys-w', s.physW, 2.0, 0.01);
+    close('Z6 dpi computes phys-h', s.physH, 1.0, 0.01);
   }
 
   // ---------------------- K. Memory hygiene ------------------------------
   // Track URL.createObjectURL/revokeObjectURL: if we render N times, only one
-  // URL should be live.
+  // URL should be live. The explicit reset() is REQUIRED — without it, prior
+  // suite cleanup runs against the patched URL functions and skews counts.
+  await reset();
   const created = [], revoked = [];
   const oCreate = URL.createObjectURL, oRevoke = URL.revokeObjectURL;
   URL.createObjectURL = function (b) { const u = oCreate.call(URL, b); created.push(u); return u; };
@@ -651,12 +816,11 @@ window.__runTests = async function () {
     await sleep(150);
   }
   await sleep(400);
-  // We expect at least 5 creates and 4 revokes (last one stays live).
   const aliveCount = created.length - revoked.length;
-  truthy('K1 only one URL alive at a time', aliveCount === 1);
+  truthy(`K1 only one URL alive at a time (created=${created.length} revoked=${revoked.length})`, aliveCount === 1);
   $('reset').click();
   await sleep(200);
-  truthy('K2 reset revokes live URL', created.length === revoked.length);
+  truthy(`K2 reset revokes live URL (created=${created.length} revoked=${revoked.length})`, created.length === revoked.length);
   URL.createObjectURL = oCreate; URL.revokeObjectURL = oRevoke;
 
   // ---------------------- L. Drag and drop -------------------------------

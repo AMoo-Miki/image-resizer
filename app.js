@@ -40,6 +40,15 @@
   let outputUrl = null;
   let debounceTimer = null;
 
+  // --- Persisted preferences ---------------------------------------------
+  // Settings the user has chosen. We persist these across reloads (and across
+  // the "Choose another" reset) so the next image inherits the same prefs.
+  // Image-specific numeric inputs (exact-w/h, phys-w/h) are deliberately not
+  // remembered — restoring them onto a different source image would be weird.
+  const STORAGE_KEY = 'image-resizer-prefs-v1';
+  const REMEMBERED = ['dim-mode', 'percent', 'phys-unit', 'phys-dpi',
+                      'strategy', 'quality', 'format', 'target-kb'];
+
   // Bumped on every load and reset. Async work captures it on entry and
   // bails on resolve if it no longer matches, so a slow encode can't
   // overwrite a freshly-reset UI.
@@ -209,7 +218,13 @@
         originalW = img.naturalWidth;
         originalH = img.naturalHeight;
 
+        // Default canonical = source dims, then let the active mode (which may
+        // have come from a remembered preference like "percent=50") re-derive
+        // the canonical from its own control value. Image-specific inputs
+        // (exact-w/h, phys-w/h) are blank after reset, so their setters
+        // return false and leave the source-dims default in place.
         setFromKeepOriginal();
+        recomputeFromActiveMode();
         syncDisplays();
 
         controls.hidden = false;
@@ -500,31 +515,75 @@
     meta.innerHTML = '';
     clearError();
 
-    // Restore every form control back to its initial default so the next
-    // image doesn't inherit the previous session's settings.
-    dimMode.value = 'none';
-    percent.value = 50;
-    percentVal.textContent = '50%';
+    // Image-specific dimension fields are cleared (a width-in-pixels or
+    // print-size only makes sense in the context of a particular image).
+    // All other preferences (dim-mode, format, quality, dpi, etc.) are
+    // intentionally preserved so the next image inherits the user's setup.
     exactW.value = '';
     exactH.value = '';
     physW.value = '';
     physH.value = '';
-    physUnit.value = 'in';
-    physDpi.value = '300';
     physPxReadout.textContent = '';
-    strategy.value = 'quality';
-    quality.value = 80;
-    qualityVal.textContent = '80%';
-    quality.disabled = false;
-    targetKb.value = '500';
-    format.value = 'image/webp';
+  });
+
+  // --- Preference persistence --------------------------------------------
+  function loadPrefs() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function savePrefs() {
+    try {
+      const obj = {};
+      for (const id of REMEMBERED) {
+        const el = $(id);
+        if (el) obj[id] = el.value;
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+    } catch {
+      // localStorage may be disabled (private mode in some browsers); fail silent.
+    }
+  }
+
+  // Restore persisted prefs into form controls and refresh dependent UI.
+  function applyPrefs() {
+    const p = loadPrefs();
+    if (p) {
+      for (const id of REMEMBERED) {
+        const el = $(id);
+        if (el && p[id] !== undefined && p[id] !== null) el.value = p[id];
+      }
+    }
+    // Refresh derived UI state, regardless of whether prefs were loaded
+    // (covers the first-visit factory-default case too).
     syncDimRows();
     $('row-quality').hidden = strategy.value !== 'quality';
     $('row-target').hidden = strategy.value !== 'target';
-  });
+    qualityVal.textContent = quality.value + '%';
+    quality.disabled = format.value === 'image/png';
+    percentVal.textContent = percent.value + '%';
+  }
 
-  // Initial UI state
-  syncDimRows();
-  $('row-quality').hidden = strategy.value !== 'quality';
-  $('row-target').hidden = strategy.value !== 'target';
+  // Save prefs whenever the user touches a remembered control. Programmatic
+  // .value assignments don't fire events, so syncDisplays/applyPrefs/reset
+  // can change values without re-saving (no infinite loops).
+  for (const id of REMEMBERED) {
+    const el = $(id);
+    if (!el) continue;
+    el.addEventListener('change', savePrefs);
+    el.addEventListener('input', savePrefs);
+  }
+
+  // Initial UI state — apply persisted prefs (or factory defaults).
+  applyPrefs();
+
+  // Test hook: tests need to invoke applyPrefs after seeding localStorage to
+  // simulate a page reload without an actual navigation.
+  if (typeof window !== 'undefined') {
+    window.__imageResizerInternals = { applyPrefs, savePrefs, loadPrefs, STORAGE_KEY };
+  }
 })();
