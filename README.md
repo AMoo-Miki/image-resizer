@@ -12,7 +12,7 @@ Live: https://resizer.barahmand.com
 - Manual quality slider, or "find the best quality that fits under N KB" (binary search).
 - Live preview, before/after size with savings percentage.
 - Drag and drop or click to choose. Keyboard accessible.
-- Dark UI matching the [Sidekick](../sidekick) design system.
+- Dark zinc/violet theme.
 
 ## How to use
 
@@ -23,15 +23,30 @@ The "physical size + DPI" mode just drives the **pixel** dimensions — it does 
 ## Project layout
 
 ```
-index.html              markup
+index.html              app markup
 styles.css              all styling (zinc/violet tokens, fade animations)
 app.js                  all behavior (vanilla JS, single IIFE)
 CNAME                   custom domain for GitHub Pages
 .github/workflows/
   pages.yml             auto-deploy on push to main
+test/
+  index.html            in-browser test harness
+  run.js                test runner (~200 assertions)
+  fixtures/
+    sample.jpg          real Canon JPEG for end-to-end pipeline tests
 ```
 
 No build step. No dependencies. No framework.
+
+## Development
+
+Serve the repo over HTTP from any directory (the app uses absolute fixture paths, so `file://` won't load the JPEG):
+
+```bash
+python3 -m http.server 8765
+```
+
+Then open `http://127.0.0.1:8765/` for the app, or `http://127.0.0.1:8765/test/` for the test harness. The harness grafts the live app's DOM into a results page, runs the full suite, and renders pass/fail at the bottom.
 
 ## Deployment
 
