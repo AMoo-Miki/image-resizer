@@ -804,6 +804,39 @@ window.__runTests = async function () {
     close('Z6 dpi computes phys-h', s.physH, 1.0, 0.01);
   }
 
+  // Z7 — recomputeFromActiveMode honors the H/partner field if W is empty.
+  // Today nothing in the live UI produces this state (reset clears both
+  // fields atomically), but the OR fallback in recomputeFromActiveMode is
+  // the contract that lets a future restore path set only H without us
+  // silently snapping back to source dims.
+  await reset();
+  // Get an image loaded first so we can switch dim-mode to 'exact' (which
+  // gets persisted via savePrefs and survives the reset click below).
+  await loadDefault(1696, 1131);
+  setSelect($('dim-mode'), 'exact');
+  await sleep(80);
+  // Click the app's Reset button: clears exact-w/h fields, hides controls,
+  // but preserves dim-mode='exact' via the persistence layer.
+  $('reset').click();
+  await sleep(60);
+  // Manually engineer the asymmetric state the OR-fallback exists to handle:
+  // exact-h has a value, exact-w is empty. (Programmatic .value writes don't
+  // fire events, so this state is preserved into the upcoming img.onload.)
+  $('exact-w').value = '';
+  $('exact-h').value = '600';
+  // Now load a fresh image. img.onload → recomputeFromActiveMode → exact branch
+  // → setFromExactW() returns false (empty) → setFromExactH() picks up 600.
+  const z7Blob = await makePng(2000, 1000); // 2:1 image
+  const z7PrevSrc = ($('preview').querySelector('img') || {}).src || '';
+  await loadBlob(z7Blob, 'z7.png');
+  await waitForRender(z7PrevSrc);
+  {
+    const s = readState();
+    // 600 px tall × 2:1 ratio = 1200 px wide.
+    eq('Z7 recompute uses exact-h when exact-w is empty: H', s.exactH, 600);
+    eq('Z7 recompute derives exact-w from exact-h: W',         s.exactW, 1200);
+  }
+
   // ---------------------- K. Memory hygiene ------------------------------
   // Track URL.createObjectURL/revokeObjectURL: if we render N times, only one
   // URL should be live. The explicit reset() is REQUIRED — without it, prior

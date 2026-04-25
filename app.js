@@ -153,8 +153,8 @@
   function recomputeFromActiveMode() {
     const m = dimMode.value;
     if (m === 'percent') setFromPercent();
-    else if (m === 'exact') setFromExactW();
-    else if (m === 'physical') setFromPhysW();
+    else if (m === 'exact') setFromExactW() || setFromExactH();
+    else if (m === 'physical') setFromPhysW() || setFromPhysH();
     else setFromKeepOriginal();
   }
 
