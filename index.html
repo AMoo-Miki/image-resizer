@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Image Resizer</title>
+  <meta name="description" content="Resize and compress images in your browser. Stays 100% local.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="app">
+    <header class="app-header">
+      <div class="logo-dot" aria-hidden="true"></div>
+      <div>
+        <h1>Image Resizer</h1>
+        <p class="subtitle">Resize and compress images without uploading them anywhere.</p>
+      </div>
+    </header>
+
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Drop an image here or click to choose">
+      <p><strong>Drop an image here</strong> or click to choose</p>
+      <p class="hint">Stays on your machine <span class="pill pill-success">100% local</span></p>
+      <input type="file" id="file" accept="image/*" hidden>
+    </div>
+
+    <div class="panel" id="controls" hidden>
+
+      <section class="section">
+        <h3>Dimensions</h3>
+        <div class="row">
+          <label for="dim-mode">Mode</label>
+          <select id="dim-mode">
+            <option value="none">Keep original</option>
+            <option value="percent">Percentage</option>
+            <option value="maxdim">Max longest side</option>
+            <option value="exact">Exact width &times; height</option>
+            <option value="physical">Physical size + DPI</option>
+          </select>
+        </div>
+
+        <div class="row" id="row-percent" hidden>
+          <label for="percent">Scale</label>
+          <input type="range" id="percent" min="1" max="200" value="50">
+          <span id="percent-val" class="value-readout">50%</span>
+        </div>
+
+        <div class="row" id="row-maxdim" hidden>
+          <label for="maxdim">Max side (px)</label>
+          <input type="number" id="maxdim" value="2560" min="1">
+        </div>
+
+        <div class="row" id="row-exact" hidden>
+          <label for="exact-w">Width &times; Height</label>
+          <input type="number" id="exact-w" min="1" placeholder="W">
+          <span class="dim-x">&times;</span>
+          <input type="number" id="exact-h" min="1" placeholder="H">
+          <span class="ratio-note">aspect ratio locked</span>
+        </div>
+
+        <div class="row" id="row-physical" hidden>
+          <label for="phys-w">Print size</label>
+          <input type="number" id="phys-w" min="0.01" step="0.01" placeholder="W">
+          <span class="dim-x">&times;</span>
+          <input type="number" id="phys-h" min="0.01" step="0.01" placeholder="H">
+          <select id="phys-unit">
+            <option value="in">in</option>
+            <option value="cm">cm</option>
+          </select>
+        </div>
+        <div class="row" id="row-physical-dpi" hidden>
+          <label for="phys-dpi">DPI</label>
+          <input type="number" id="phys-dpi" value="300" min="1">
+          <span class="ratio-note" id="phys-px-readout"></span>
+        </div>
+      </section>
+
+      <section class="section">
+        <h3>Compression</h3>
+        <div class="row">
+          <label for="strategy">Strategy</label>
+          <select id="strategy">
+            <option value="quality">Manual quality</option>
+            <option value="target">Target file size</option>
+          </select>
+        </div>
+        <div class="row" id="row-quality">
+          <label for="quality">Quality</label>
+          <input type="range" id="quality" min="1" max="100" value="80">
+          <span id="quality-val" class="value-readout">80%</span>
+        </div>
+        <div class="row" id="row-target" hidden>
+          <label for="target-kb">Target (KB)</label>
+          <input type="number" id="target-kb" value="500" min="1">
+          <button class="small" id="target-go" type="button">Find quality</button>
+        </div>
+        <div class="row">
+          <label for="format">Format</label>
+          <select id="format">
+            <option value="image/webp" selected>WebP (best compression)</option>
+            <option value="image/jpeg">JPEG</option>
+            <option value="image/png">PNG (lossless)</option>
+          </select>
+        </div>
+      </section>
+
+      <div class="preview" id="preview"></div>
+      <div class="meta" id="meta"></div>
+      <div class="error" id="error" hidden></div>
+
+      <div class="actions">
+        <button id="download" type="button" disabled>Download</button>
+        <button class="secondary" id="reset" type="button">Choose another</button>
+      </div>
+    </div>
+
+    <footer class="app-footer">
+      <a href="https://github.com/AMoo-Miki/image-resizer" target="_blank" rel="noopener">Source on GitHub</a>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
